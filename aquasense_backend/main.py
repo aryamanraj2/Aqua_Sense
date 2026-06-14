@@ -15,6 +15,7 @@ from models.tank import Tank
 from models.water_quality import WaterQuality
 from models.product import Product
 from models.order import Order
+from models.node import Node, Telemetry, Command, CommandAck
 
 # Configure logging to show in terminal
 logging.basicConfig(
