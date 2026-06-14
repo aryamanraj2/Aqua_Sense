@@ -25,3 +25,11 @@ DerivedData/
 *.ipa
 *.dSYM.zip
 *.dSYM
+# Never commit real xcconfig secrets
+IOS/aqua/Secrets.xcconfig
+
+# Backend secrets
+aquasense_backend/.env
+
+# Hardware firmware secrets
+hardware/firmware/include/secrets.h
