@@ -143,7 +143,106 @@ class NodeService:
         )
 
     # ------------------------------------------------------------------ #
-    # Commands (queue, dispatch, ack) -- implemented in batch 4
+    # Commands (queue, dispatch, ack)
+    # ------------------------------------------------------------------ #
+    def queue_command(
+        self,
+        node_id: str,
+        actuator: str,
+        action: str,
+        params: dict,
+        reason: Optional[str] = None,
+        safety_critical: bool = False,
+    ) -> Command:
+        """Validate and enqueue an actuator command for a node.
+
+        Dosing commands are checked against server-side bounds before queuing
+        (defense in depth — the node also enforces limits locally).
+        """
+        if actuator == "ph_doser" and action == "dose":
+            ml = float(params.get("ml", 0))
+            self._assert_dose_within_bounds(node_id, ml)
+
+        cmd = Command(
+            node_id=node_id,
+            actuator=actuator,
+            action=action,
+            params=params,
+            reason=reason,
+            safety_critical=safety_critical,
+            status="pending",
+        )
+        self.db.add(cmd)
+        self.db.commit()
+        self.db.refresh(cmd)
+        logger.info(
+            "command.queued node_id=%s command_id=%s actuator=%s action=%s reason=%r",
+            node_id, cmd.id, actuator, action, reason,
+        )
+        return cmd
+
+    def get_pending_commands(self, node_id: str) -> List[Command]:
+        """Return pending commands for a node and mark them dispatched."""
+        cmds = (
+            self.db.query(Command)
+            .filter(Command.node_id == node_id, Command.status == "pending")
+            .order_by(Command.issued_at)
+            .all()
+        )
+        now = datetime.utcnow()
+        for cmd in cmds:
+            cmd.status = "dispatched"
+            cmd.dispatched_at = now
+        self.db.commit()
+        return cmds
+
+    def process_ack(self, node_id: str, ack_payload: "CommandAckSchema") -> Command:
+        """Record a command ack (including authoritative refusals).
+
+        A refused safety-critical command is never retried — the backend flags
+        it for human escalation instead.
+        """
+        cmd = (
+            self.db.query(Command)
+            .filter(Command.id == ack_payload.command_id, Command.node_id == node_id)
+            .first()
+        )
+        if cmd is None:
+            raise ValueError(f"Unknown command_id={ack_payload.command_id} for node {node_id}")
+
+        ack = CommandAck(
+            command_id=cmd.id,
+            status=ack_payload.status,
+            detail=ack_payload.detail,
+            completed_at=ack_payload.completed_at,
+        )
+        self.db.add(ack)
+        cmd.status = ack_payload.status
+
+        if ack_payload.status == "refused":
+            logger.warning(
+                "command.refused node_id=%s command_id=%s safety_critical=%s detail=%r",
+                node_id, cmd.id, cmd.safety_critical, ack_payload.detail,
+            )
+            if cmd.safety_critical:
+                # Safety contract: refused safety-critical commands escalate to
+                # a human. Auto-retry is explicitly forbidden.
+                logger.error(
+                    "ESCALATE node_id=%s command_id=%s — safety-critical refusal, "
+                    "human intervention required",
+                    node_id, cmd.id,
+                )
+        else:
+            logger.info(
+                "command.ack node_id=%s command_id=%s status=%s",
+                node_id, cmd.id, ack_payload.status,
+            )
+
+        self.db.commit()
+        return cmd
+
+    # ------------------------------------------------------------------ #
+    # Dose bounding (private)
     # ------------------------------------------------------------------ #
     def _assert_dose_within_bounds(self, node_id: str, ml: float) -> None:
         """Server-side dose bounding (defense in depth)."""
